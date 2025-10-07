@@ -1,0 +1,6 @@
+flask
+yt-dlp
+gunicorn
+flask-limiter
+pillow
+requests
