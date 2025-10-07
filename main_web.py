@@ -1,7 +1,6 @@
 from flask import Flask, render_template, request, send_file, jsonify, Response
 import yt_dlp
 import os
-import platform
 import shutil
 import logging
 from datetime import datetime
@@ -10,15 +9,15 @@ import time
 import uuid
 import json
 from urllib.parse import urlparse
+import tempfile
+import subprocess
+import sys
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Automatically detect platform and pick correct ffmpeg binary
-if platform.system() == "Windows":
-    FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg.exe")
-else:
-    FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
+# Path to ffmpeg (keep in project root or provide absolute path)
+FFMPEG_PATH = os.environ.get('FFMPEG_PATH', 'ffmpeg.exe')
 
 # Optional API key: if INSTAWEB_API_KEY is set, incoming /start requests must provide it
 API_KEY = os.environ.get('INSTAWEB_API_KEY')
@@ -31,6 +30,11 @@ jobs_lock = threading.Lock()
 rate_limit = {}
 RATE_LIMIT_COUNT = int(os.environ.get('RATE_LIMIT_COUNT', '5'))
 RATE_LIMIT_WINDOW = int(os.environ.get('RATE_LIMIT_WINDOW', str(60 * 60)))  # seconds
+RATE_LIMIT_CONCURRENT = int(os.environ.get('RATE_LIMIT_CONCURRENT', '3'))
+
+# Optional: allow yt-dlp auto-update
+YTDLP_AUTO_UPDATE = os.environ.get('YTDLP_AUTO_UPDATE', 'false').lower() in ('1', 'true', 'yes')
+YTDLP_UPDATE_INTERVAL_MIN = int(os.environ.get('YTDLP_UPDATE_INTERVAL_MIN', '60'))
 
 # Directory for temporary downloads
 BASE_DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), 'downloads')
@@ -53,6 +57,16 @@ def check_rate_limit(ip):
     times.append(now)
     rate_limit[ip] = times
     return True
+
+
+def check_concurrent_limit(ip):
+    """Ensure an IP doesn't have too many queued/running jobs at once."""
+    count = 0
+    with jobs_lock:
+        for j in jobs.values():
+            if j.get('ip') == ip and j.get('status') in ('queued', 'running'):
+                count += 1
+    return count < RATE_LIMIT_CONCURRENT
 
 
 def is_valid_instagram_url(url):
@@ -135,7 +149,25 @@ cleaner_thread = threading.Thread(target=background_cleaner, daemon=True)
 cleaner_thread.start()
 
 
-def run_download_job(job_id, url, fmt):
+# Optional yt-dlp auto-updater thread
+def ytdlp_auto_updater():
+    while True:
+        try:
+            logging.info('Running yt-dlp auto-update check...')
+            # Use pip to update the installed package in the current Python environment
+            subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp'], check=True)
+            logging.info('yt-dlp auto-update completed')
+        except Exception:
+            logging.exception('yt-dlp auto-update failed')
+        time.sleep(max(1, YTDLP_UPDATE_INTERVAL_MIN) * 60)
+
+
+if YTDLP_AUTO_UPDATE:
+    t = threading.Thread(target=ytdlp_auto_updater, daemon=True)
+    t.start()
+
+
+def run_download_job(job_id, url, fmt, cookies=None, proxy=None):
     temp_dir = os.path.join(BASE_DOWNLOAD_DIR, job_id)
     os.makedirs(temp_dir, exist_ok=True)
     with jobs_lock:
@@ -151,6 +183,28 @@ def run_download_job(job_id, url, fmt):
             'ffmpeg_location': FFMPEG_PATH,
             'quiet': True,
         }
+
+        # Handle cookies: if cookies is provided as content, write to a cookiefile in temp_dir.
+        cookiefile_path = None
+        if cookies:
+            # If cookies looks like an existing file path, use it directly
+            if os.path.isabs(cookies) and os.path.exists(cookies):
+                cookiefile_path = cookies
+            else:
+                # write provided cookies/content into a cookiefile inside temp_dir
+                try:
+                    cookiefile_path = os.path.join(temp_dir, 'cookies.txt')
+                    with open(cookiefile_path, 'w', encoding='utf-8') as cf:
+                        cf.write(cookies)
+                except Exception:
+                    cookiefile_path = None
+
+        if cookiefile_path:
+            ydl_opts['cookiefile'] = cookiefile_path
+
+        # Proxy support
+        if proxy:
+            ydl_opts['proxy'] = proxy
         if fmt == 'audio':
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
@@ -242,6 +296,10 @@ def start():
         return jsonify({'error': 'Rate limit exceeded'}), 429
 
     job_id = uuid.uuid4().hex
+    # Accept optional cookies (either cookie file path or cookie jar text) and proxy from the request
+    cookies = data.get('cookies')
+    proxy = data.get('proxy')
+
     with jobs_lock:
         jobs[job_id] = {
             'id': job_id,
@@ -251,9 +309,11 @@ def start():
             'format': fmt,
             'url': url,
             'ip': ip,
+            'cookies': bool(cookies),
+            'proxy': bool(proxy),
         }
 
-    thread = threading.Thread(target=run_download_job, args=(job_id, url, fmt), daemon=True)
+    thread = threading.Thread(target=run_download_job, args=(job_id, url, fmt, cookies, proxy), daemon=True)
     thread.start()
 
     return jsonify({'job_id': job_id})
@@ -285,7 +345,6 @@ def events(job_id):
             time.sleep(0.5)
     return Response(gen(), mimetype='text/event-stream')
 
-
 @app.route('/download/<job_id>')
 def download(job_id):
     with jobs_lock:
@@ -305,5 +364,4 @@ def download(job_id):
 
 if __name__ == '__main__':
     app.run(debug=True, threaded=True)
-
 
