@@ -16,36 +16,42 @@ import sys
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Path to ffmpeg (keep in project root or provide absolute path)
-FFMPEG_PATH = os.environ.get('FFMPEG_PATH', 'ffmpeg.exe')
+# -------------------- CONFIGURATION --------------------
 
-# Optional API key: if INSTAWEB_API_KEY is set, incoming /start requests must provide it
-API_KEY = os.environ.get('INSTAWEB_API_KEY')
+# ffmpeg path
+FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 
-# In-memory job store (for dev). Replace with Redis or DB in production.
-jobs = {}
-jobs_lock = threading.Lock()
+# Optional API key protection
+API_KEY = os.environ.get("INSTAWEB_API_KEY")
 
-# Rate limiting: allow RATE_LIMIT_COUNT requests per RATE_LIMIT_WINDOW seconds per IP
-rate_limit = {}
-RATE_LIMIT_COUNT = int(os.environ.get('RATE_LIMIT_COUNT', '5'))
-RATE_LIMIT_WINDOW = int(os.environ.get('RATE_LIMIT_WINDOW', str(60 * 60)))  # seconds
-RATE_LIMIT_CONCURRENT = int(os.environ.get('RATE_LIMIT_CONCURRENT', '3'))
+# Load Instagram cookies (from Render Environment Variables)
+INSTAGRAM_COOKIES = os.environ.get("INSTAGRAM_COOKIES")
 
-# Optional: allow yt-dlp auto-update
-YTDLP_AUTO_UPDATE = os.environ.get('YTDLP_AUTO_UPDATE', 'false').lower() in ('1', 'true', 'yes')
-YTDLP_UPDATE_INTERVAL_MIN = int(os.environ.get('YTDLP_UPDATE_INTERVAL_MIN', '60'))
+# Rate limiting
+RATE_LIMIT_COUNT = int(os.environ.get("RATE_LIMIT_COUNT", "5"))
+RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", str(60 * 60)))  # 1 hour
+RATE_LIMIT_CONCURRENT = int(os.environ.get("RATE_LIMIT_CONCURRENT", "3"))
 
-# Directory for temporary downloads
-BASE_DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), 'downloads')
+# Auto-update yt-dlp (optional)
+YTDLP_AUTO_UPDATE = os.environ.get("YTDLP_AUTO_UPDATE", "false").lower() in ("1", "true", "yes")
+YTDLP_UPDATE_INTERVAL_MIN = int(os.environ.get("YTDLP_UPDATE_INTERVAL_MIN", "60"))
+
+# Temp download directory
+BASE_DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(BASE_DOWNLOAD_DIR, exist_ok=True)
 
+# In-memory job and rate store
+jobs = {}
+jobs_lock = threading.Lock()
+rate_limit = {}
+
+# -------------------- UTILS --------------------
 
 def get_client_ip():
-    forwarded = request.headers.get('X-Forwarded-For')
+    forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-        return forwarded.split(',')[0].strip()
-    return request.remote_addr or 'unknown'
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "unknown"
 
 
 def check_rate_limit(ip):
@@ -59,31 +65,16 @@ def check_rate_limit(ip):
     return True
 
 
-def check_concurrent_limit(ip):
-    """Ensure an IP doesn't have too many queued/running jobs at once."""
-    count = 0
-    with jobs_lock:
-        for j in jobs.values():
-            if j.get('ip') == ip and j.get('status') in ('queued', 'running'):
-                count += 1
-    return count < RATE_LIMIT_CONCURRENT
-
-
 def is_valid_instagram_url(url):
     try:
         parsed = urlparse(url)
-        if parsed.scheme not in ('http', 'https'):
+        if parsed.scheme not in ("http", "https"):
             return False
         host = parsed.netloc.lower()
-        # allow instagram.com and www.instagram.com and m.instagram.com
-        if not (host == 'instagram.com' or host.endswith('.instagram.com')):
+        if not (host == "instagram.com" or host.endswith(".instagram.com")):
             return False
-        # require a path that looks like a reel/post/tv: e.g. /reel/, /reels/, /p/, /tv/
         path = parsed.path.lower()
-        if any(path.startswith(p) for p in ('/reel/', '/reels/', '/p/', '/tv/')):
-            return True
-        # also accept URLs that contain /reel or /reels anywhere
-        if '/reel' in path or '/reels' in path or '/p/' in path or '/tv/' in path:
+        if any(x in path for x in ("/reel/", "/reels/", "/p/", "/tv/")):
             return True
         return False
     except Exception:
@@ -96,30 +87,28 @@ def yt_progress_hook(job_id):
             job = jobs.get(job_id)
             if not job:
                 return
-            status = d.get('status')
-            if status == 'downloading':
-                total = d.get('total_bytes') or d.get('total_bytes_estimate')
-                downloaded = d.get('downloaded_bytes', 0)
+            status = d.get("status")
+            if status == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate")
+                downloaded = d.get("downloaded_bytes", 0)
                 try:
                     percent = (downloaded / total) * 100 if total else None
                 except Exception:
                     percent = None
-                job['progress'] = {
-                    'status': 'downloading',
-                    'downloaded': downloaded,
-                    'total': total,
-                    'percent': percent,
-                    'eta': d.get('eta')
+                job["progress"] = {
+                    "status": "downloading",
+                    "downloaded": downloaded,
+                    "total": total,
+                    "percent": percent,
+                    "eta": d.get("eta"),
                 }
-            elif status == 'finished':
-                job['progress'] = {'status': 'finished'}
-            elif status == 'error':
-                job['progress'] = {'status': 'error', 'message': d.get('errmsg')}
+            elif status == "finished":
+                job["progress"] = {"status": "finished"}
     return hook
 
 
 def background_cleaner():
-    """Background thread that deletes files older than 30 minutes and clears jobs."""
+    """Delete old temp files every 30 minutes."""
     while True:
         now = time.time()
         cutoff = now - (30 * 60)
@@ -127,15 +116,14 @@ def background_cleaner():
             for name in os.listdir(BASE_DOWNLOAD_DIR):
                 path = os.path.join(BASE_DOWNLOAD_DIR, name)
                 try:
-                    mtime = os.path.getmtime(path)
-                    if mtime < cutoff:
+                    if os.path.getmtime(path) < cutoff:
                         if os.path.isdir(path):
                             shutil.rmtree(path, ignore_errors=True)
                         else:
                             os.remove(path)
                         with jobs_lock:
                             for jid, j in list(jobs.items()):
-                                if j.get('temp_dir') == path or j.get('filepath', '').startswith(path):
+                                if j.get("temp_dir") == path:
                                     jobs.pop(jid, None)
                 except Exception:
                     pass
@@ -144,101 +132,77 @@ def background_cleaner():
         time.sleep(60)
 
 
-# Launch cleaner thread (daemon)
-cleaner_thread = threading.Thread(target=background_cleaner, daemon=True)
-cleaner_thread.start()
+threading.Thread(target=background_cleaner, daemon=True).start()
 
 
-# Optional yt-dlp auto-updater thread
 def ytdlp_auto_updater():
     while True:
         try:
-            logging.info('Running yt-dlp auto-update check...')
-            # Use pip to update the installed package in the current Python environment
-            subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp'], check=True)
-            logging.info('yt-dlp auto-update completed')
+            logging.info("Checking yt-dlp updates...")
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
+                check=True,
+            )
+            logging.info("yt-dlp updated successfully")
         except Exception:
-            logging.exception('yt-dlp auto-update failed')
+            logging.exception("yt-dlp update failed")
         time.sleep(max(1, YTDLP_UPDATE_INTERVAL_MIN) * 60)
 
 
 if YTDLP_AUTO_UPDATE:
-    t = threading.Thread(target=ytdlp_auto_updater, daemon=True)
-    t.start()
+    threading.Thread(target=ytdlp_auto_updater, daemon=True).start()
 
+
+# -------------------- DOWNLOAD LOGIC --------------------
 
 def run_download_job(job_id, url, fmt, cookies=None, proxy=None):
     temp_dir = os.path.join(BASE_DOWNLOAD_DIR, job_id)
     os.makedirs(temp_dir, exist_ok=True)
     with jobs_lock:
-        jobs[job_id]['temp_dir'] = temp_dir
-        jobs[job_id]['status'] = 'running'
-        jobs[job_id]['progress'] = {'status': 'started'}
+        jobs[job_id]["temp_dir"] = temp_dir
+        jobs[job_id]["status"] = "running"
+        jobs[job_id]["progress"] = {"status": "started"}
+
+    # If no cookies passed in request, use environment cookies
+    if not cookies and INSTAGRAM_COOKIES:
+        try:
+            cookiefile_path = os.path.join(temp_dir, "env_cookies.txt")
+            with open(cookiefile_path, "w", encoding="utf-8") as cf:
+                cf.write(INSTAGRAM_COOKIES)
+            cookies = cookiefile_path
+            logging.info(f"Using environment cookies for job {job_id}")
+        except Exception as e:
+            logging.error(f"Failed to write environment cookies: {e}")
+
     try:
-        outtmpl = os.path.join(temp_dir, '%(id)s.%(ext)s')
+        outtmpl = os.path.join(temp_dir, "%(id)s.%(ext)s")
         ydl_opts = {
-            'outtmpl': outtmpl,
-            'noplaylist': True,
-            'progress_hooks': [yt_progress_hook(job_id)],
-            'ffmpeg_location': FFMPEG_PATH,
-            'quiet': True,
+            "outtmpl": outtmpl,
+            "noplaylist": True,
+            "progress_hooks": [yt_progress_hook(job_id)],
+            "ffmpeg_location": FFMPEG_PATH,
+            "quiet": True,
         }
 
-        # Handle cookies: if cookies is provided as content, write to a cookiefile in temp_dir.
-        cookiefile_path = None
         if cookies:
-            # If cookies looks like an existing file path, use it directly
-            if os.path.isabs(cookies) and os.path.exists(cookies):
-                cookiefile_path = cookies
-            else:
-                # write provided cookies/content into a cookiefile inside temp_dir
-                try:
-                    cookiefile_path = os.path.join(temp_dir, 'cookies.txt')
-                    with open(cookiefile_path, 'w', encoding='utf-8') as cf:
-                        cf.write(cookies)
-                except Exception:
-                    cookiefile_path = None
-
-        if cookiefile_path:
-            ydl_opts['cookiefile'] = cookiefile_path
-
-        # Proxy support
+            ydl_opts["cookiefile"] = cookies
         if proxy:
-            ydl_opts['proxy'] = proxy
-        if fmt == 'audio':
-            ydl_opts['format'] = 'bestaudio/best'
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }]
-            final_ext = 'mp3'
-        else:
-            ydl_opts['format'] = 'bestvideo+bestaudio/best'
-            final_ext = 'mp4'
+            ydl_opts["proxy"] = proxy
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.extract_info(url, download=True)
-        except yt_dlp.utils.DownloadError as de:
-            logging.exception('yt-dlp download error')
-            with jobs_lock:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = 'Failed to download media. The URL may be private or invalid.'
-            return
-        except FileNotFoundError as fe:
-            # Likely ffmpeg missing
-            logging.exception('ffmpeg not found')
-            with jobs_lock:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = 'ffmpeg not found or not executable. Please install ffmpeg.'
-            return
-        except Exception as e:
-            logging.exception('unexpected download error')
-            with jobs_lock:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = 'Unexpected error during download.'
-            return
+        if fmt == "audio":
+            ydl_opts["format"] = "bestaudio/best"
+            ydl_opts["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }]
+            final_ext = "mp3"
+        else:
+            ydl_opts["format"] = "bestvideo+bestaudio/best"
+            final_ext = "mp4"
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info(url, download=True)
 
         produced = None
         for root, _, files in os.walk(temp_dir):
@@ -250,76 +214,77 @@ def run_download_job(job_id, url, fmt, cookies=None, proxy=None):
                 break
 
         if not produced:
-            with jobs_lock:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = 'Download finished but output file not found.'
-            return
+            raise FileNotFoundError("Output file not found after download.")
 
         with jobs_lock:
-            jobs[job_id]['status'] = 'ready'
-            jobs[job_id]['filepath'] = produced
-            jobs[job_id]['filename'] = os.path.basename(produced)
-            try:
-                jobs[job_id]['size'] = os.path.getsize(produced)
-            except Exception:
-                jobs[job_id]['size'] = None
+            jobs[job_id]["status"] = "ready"
+            jobs[job_id]["filepath"] = produced
+            jobs[job_id]["filename"] = os.path.basename(produced)
+            jobs[job_id]["size"] = os.path.getsize(produced) if os.path.exists(produced) else None
 
-    except Exception as e:
-        logging.exception('run_download_job failed')
+    except yt_dlp.utils.DownloadError:
+        logging.exception("yt-dlp download error")
         with jobs_lock:
-            jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error'] = 'Server error while processing the download.'
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = "Failed to download media. The URL may be private or invalid."
+    except FileNotFoundError:
+        with jobs_lock:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = "ffmpeg not found or output missing."
+    except Exception:
+        logging.exception("Unexpected error in run_download_job")
+        with jobs_lock:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = "Unexpected server error during download."
 
 
-@app.route('/')
+# -------------------- ROUTES --------------------
+
+@app.route("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
 
 
-@app.route('/start', methods=['POST'])
+@app.route("/start", methods=["POST"])
 def start():
     data = request.get_json() or {}
-    url = data.get('url')
-    fmt = data.get('format', 'mp4')
+    url = data.get("url")
+    fmt = data.get("format", "mp4")
 
-    # If API key is configured, require it in header or JSON
     if API_KEY:
-        key = request.headers.get('X-API-Key') or data.get('api_key')
+        key = request.headers.get("X-API-Key") or data.get("api_key")
         if not key or key != API_KEY:
-            return jsonify({'error': 'Invalid or missing API key'}), 401
+            return jsonify({"error": "Invalid or missing API key"}), 401
 
     if not url or not is_valid_instagram_url(url):
-        return jsonify({'error': 'Invalid Instagram URL'}), 400
+        return jsonify({"error": "Invalid Instagram URL"}), 400
 
     ip = get_client_ip()
     if not check_rate_limit(ip):
-        return jsonify({'error': 'Rate limit exceeded'}), 429
+        return jsonify({"error": "Rate limit exceeded"}), 429
 
     job_id = uuid.uuid4().hex
-    # Accept optional cookies (either cookie file path or cookie jar text) and proxy from the request
-    cookies = data.get('cookies')
-    proxy = data.get('proxy')
+    cookies = data.get("cookies")
+    proxy = data.get("proxy")
 
     with jobs_lock:
         jobs[job_id] = {
-            'id': job_id,
-            'status': 'queued',
-            'progress': {'status': 'queued'},
-            'created_at': time.time(),
-            'format': fmt,
-            'url': url,
-            'ip': ip,
-            'cookies': bool(cookies),
-            'proxy': bool(proxy),
+            "id": job_id,
+            "status": "queued",
+            "progress": {"status": "queued"},
+            "created_at": time.time(),
+            "format": fmt,
+            "url": url,
+            "ip": ip,
+            "cookies": bool(cookies),
+            "proxy": bool(proxy),
         }
 
-    thread = threading.Thread(target=run_download_job, args=(job_id, url, fmt, cookies, proxy), daemon=True)
-    thread.start()
-
-    return jsonify({'job_id': job_id})
+    threading.Thread(target=run_download_job, args=(job_id, url, fmt, cookies, proxy), daemon=True).start()
+    return jsonify({"job_id": job_id})
 
 
-@app.route('/events/<job_id>')
+@app.route("/events/<job_id>")
 def events(job_id):
     def gen():
         last = None
@@ -327,41 +292,43 @@ def events(job_id):
             with jobs_lock:
                 job = jobs.get(job_id)
                 if not job:
-                    payload = {'status': 'unknown'}
+                    payload = {"status": "unknown"}
                 else:
                     payload = {
-                        'status': job.get('status'),
-                        'progress': job.get('progress'),
-                        'error': job.get('error') if job.get('status') == 'error' else None,
-                        'filename': job.get('filename'),
-                        'size': job.get('size'),
+                        "status": job.get("status"),
+                        "progress": job.get("progress"),
+                        "error": job.get("error") if job.get("status") == "error" else None,
+                        "filename": job.get("filename"),
+                        "size": job.get("size"),
                     }
             s = json.dumps(payload)
             if s != last:
-                yield f'data: {s}\n\n'
+                yield f"data: {s}\n\n"
                 last = s
-            if payload.get('status') in ('ready', 'error', 'unknown'):
+            if payload.get("status") in ("ready", "error", "unknown"):
                 break
             time.sleep(0.5)
-    return Response(gen(), mimetype='text/event-stream')
+    return Response(gen(), mimetype="text/event-stream")
 
-@app.route('/download/<job_id>')
+
+@app.route("/download/<job_id>")
 def download(job_id):
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
-            return 'Job not found', 404
-        if job.get('status') != 'ready' or not job.get('filepath'):
-            return 'File not ready', 400
-        filepath = job['filepath']
-        filename = job.get('filename') or os.path.basename(filepath)
-    # send_file with download_name requires Flask >=2.0; fallback to attachment filename if not available
+            return "Job not found", 404
+        if job.get("status") != "ready" or not job.get("filepath"):
+            return "File not ready", 400
+        filepath = job["filepath"]
+        filename = job.get("filename") or os.path.basename(filepath)
+
     try:
         return send_file(filepath, as_attachment=True, download_name=filename)
     except TypeError:
         return send_file(filepath, as_attachment=True)
 
 
-if __name__ == '__main__':
-    app.run(debug=True, threaded=True)
+# -------------------- MAIN --------------------
 
+if __name__ == "__main__":
+    app.run(debug=True, threaded=True)
