@@ -1,0 +1,10 @@
+.instagram.com	TRUE	/	TRUE	1783316507	ig_did	190143A3-5732-48F3-8934-E9553CD87FCD
+.instagram.com	TRUE	/	TRUE	1786340507	datr	mwxqaGKzjNFPtqsl-JW-dijU
+.instagram.com	TRUE	/	TRUE	1786340507	mid	aGoMmwALAAFJ_lxH0NwgARSG2wih
+.instagram.com	TRUE	/	TRUE	1787669316	ig_nrcb	1
+.instagram.com	TRUE	/	TRUE	1760440713	wd	1280x632
+.instagram.com	TRUE	/	TRUE	1760440713	dpr	1.5
+.instagram.com	TRUE	/	TRUE	1794395918	csrftoken	az8HbeGgsCkZIk6yGhIDCcHz3IPEjU74
+.instagram.com	TRUE	/	TRUE	1767611918	ds_user_id	77794866078
+.instagram.com	TRUE	/	TRUE	1791359045	sessionid	77794866078%3Aja9noea9xtThBy%3A25%3AAYj7BR2Y70Cf2bDvJ6BslA0OYyQEI9NNTPyTgLqTaQ
+.instagram.com	TRUE	/	TRUE	0	rur	CCO,77794866078,1791373016:01fe94da06105fabda27185486a05b0d0e2c3c20463d4d5fe07bcf969d6b6e0393ef5379
