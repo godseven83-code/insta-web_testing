@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, send_file, jsonify, Response
 import yt_dlp
 import os
+import platform
 import shutil
 import logging
 from datetime import datetime
@@ -13,8 +14,11 @@ from urllib.parse import urlparse
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Path to ffmpeg (keep in project root or provide absolute path)
-FFMPEG_PATH = os.environ.get('FFMPEG_PATH', 'ffmpeg.exe')
+# Automatically detect platform and pick correct ffmpeg binary
+if platform.system() == "Windows":
+    FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg.exe")
+else:
+    FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 
 # Optional API key: if INSTAWEB_API_KEY is set, incoming /start requests must provide it
 API_KEY = os.environ.get('INSTAWEB_API_KEY')
@@ -301,4 +305,5 @@ def download(job_id):
 
 if __name__ == '__main__':
     app.run(debug=True, threaded=True)
+
 
