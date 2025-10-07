@@ -185,32 +185,48 @@ def run_download_job(job_id, url, fmt, cookies=None, proxy=None):
             'outtmpl': outtmpl,
             'noplaylist': True,
             'progress_hooks': [yt_progress_hook(job_id)],
-            'ffmpeg_location': FFMPEG_PATH,
             'quiet': True,
         }
 
+        # Resolve ffmpeg: prefer system 'ffmpeg' on PATH, otherwise fall back to configured FFMPEG_PATH
+        resolved_ffmpeg = shutil.which('ffmpeg') or FFMPEG_PATH
+        if not resolved_ffmpeg or not os.path.exists(resolved_ffmpeg):
+            logging.warning('ffmpeg not found at resolved path: %s; yt-dlp may fail if ffmpeg is required', resolved_ffmpeg)
+        else:
+            ydl_opts['ffmpeg_location'] = resolved_ffmpeg
+
         # Automatically load Instagram cookies from ENV (Render) or local file (for local dev)
         cookiefile_path = None
+        temp_cookie_created = False
         try:
-            env_cookies = os.environ.get('INSTAGRAM_COOKIES')
-            if env_cookies:
-                # write env cookies into a cookiefile inside temp_dir
-                cookiefile_path = os.path.join(temp_dir, 'cookies.txt')
-                with open(cookiefile_path, 'w', encoding='utf-8') as cf:
-                    cf.write(env_cookies)
-                logging.info('Loaded cookies from environment')
+            if 'INSTAGRAM_COOKIES' in os.environ and os.environ['INSTAGRAM_COOKIES']:
+                # Write the environment variable content exactly (strip outer whitespace) into a temp file
+                env_val = os.environ['INSTAGRAM_COOKIES'].strip()
+                tf = tempfile.NamedTemporaryFile(delete=False, prefix='insta_cookies_', suffix='.txt', dir=tempfile.gettempdir(), mode='w', encoding='utf-8')
+                try:
+                    # write exactly as provided (no escaping or JSON encoding)
+                    tf.write(env_val)
+                    tf.flush()
+                finally:
+                    tf.close()
+                cookiefile_path = tf.name
+                temp_cookie_created = True
+                try:
+                    byte_count = len(env_val.encode('utf-8'))
+                except Exception:
+                    byte_count = None
+                logging.info('Loaded cookies from environment (%s bytes)', byte_count if byte_count is not None else 'unknown')
             else:
                 # fallback to a local cookies.txt in the project root (development)
                 local_cookies = os.path.join(os.path.dirname(__file__), 'cookies.txt')
                 if os.path.exists(local_cookies):
                     cookiefile_path = local_cookies
-                    logging.info('Using local cookies.txt')
+                    logging.info('Using local cookies.txt file')
         except Exception:
             logging.exception('Error while loading INSTAGRAM_COOKIES or local cookies')
 
-        # Preserve per-request cookies parameter if provided (overrides nothing; used only if no ENV/local)
+        # Preserve per-request cookies parameter if provided (used only if no ENV/local)
         if not cookiefile_path and cookies:
-            # If cookies looks like an existing absolute file path, use it directly
             if isinstance(cookies, str) and os.path.isabs(cookies) and os.path.exists(cookies):
                 cookiefile_path = cookies
             else:
@@ -242,11 +258,29 @@ def run_download_job(job_id, url, fmt, cookies=None, proxy=None):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.extract_info(url, download=True)
-        except yt_dlp.utils.DownloadError as de:
-            logging.exception('yt-dlp download error')
+        except Exception as de:
+            # Specific cookie format/load errors
+            try:
+                CookieLoadError = yt_dlp.cookies.CookieLoadError
+            except Exception:
+                CookieLoadError = None
+
+            msg = str(de)
+            logging.exception('yt-dlp download error: %s', msg)
+
+            if CookieLoadError is not None and isinstance(de, CookieLoadError):
+                err_text = 'Invalid cookie format — please re-export using the Get cookies.txt LOCALLY extension.'
+            else:
+                # Inspect message for login/auth issues
+                login_keywords = ('login', '403', 'forbidden', 'private', 'authentication', 'login_required', 'not authorized', 'please sign in')
+                if any(k in msg.lower() for k in login_keywords):
+                    err_text = 'Instagram login required — please refresh cookies.'
+                else:
+                    err_text = 'Failed to download media. The URL may be private or invalid.'
+
             with jobs_lock:
                 jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = 'Failed to download media. The URL may be private or invalid.'
+                jobs[job_id]['error'] = err_text
             return
         except FileNotFoundError as fe:
             # Likely ffmpeg missing
@@ -291,6 +325,14 @@ def run_download_job(job_id, url, fmt, cookies=None, proxy=None):
         with jobs_lock:
             jobs[job_id]['status'] = 'error'
             jobs[job_id]['error'] = 'Server error while processing the download.'
+    finally:
+        # Clean up any temp cookie file created from environment
+        try:
+            if 'temp_cookie_created' in locals() and temp_cookie_created and cookiefile_path and os.path.exists(cookiefile_path):
+                os.remove(cookiefile_path)
+                logging.info('Removed temporary cookiefile %s', cookiefile_path)
+        except Exception:
+            logging.exception('Failed to remove temporary cookie file')
 
 
 @app.route('/')
